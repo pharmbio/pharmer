@@ -1,0 +1,13 @@
+condition,bio_replicate,relative_expression
+WT,1,0.977
+WT,2,0.939
+WT,3,0.966
+WT,4,1.142
+KO,1,0.176
+KO,2,0.26
+KO,3,0.412
+KO,4,0.401
+KO+rescue,1,0.733
+KO+rescue,2,0.988
+KO+rescue,3,1.11
+KO+rescue,4,0.892

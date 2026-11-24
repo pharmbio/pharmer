@@ -1,0 +1,8 @@
+numpy
+pandas
+matplotlib
+scipy
+pillow
+# needed only to audit exported PDF files
+pdfplumber
+pypdf

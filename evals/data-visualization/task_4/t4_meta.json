@@ -1,0 +1,11 @@
+{
+ "pixel_size_um": 0.656,
+ "channels": {
+  "DNA": "Hoechst 33342",
+  "ER": "Concanavalin A",
+  "RNA": "SYTO 14",
+  "AGP": "Phalloidin + WGA",
+  "Mito": "MitoTracker Deep Red"
+ },
+ "profile_values": "robust z-score vs DMSO (median/MAD)"
+}

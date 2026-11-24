@@ -1,0 +1,3 @@
+
+
+For PLOS ONE: please make Figure 4 with (A) representative Cell Painting images (all 5 channels plus a merge) for DMSO, Compound A and Compound B from t4_images.npz (keys are 'condition|channel'; pixel size and dyes are in t4_meta.json), and (B) a heatmap of the morphological profiles in t4_profiles.csv (24 compounds x 60 features, robust z-scores), grouped by mechanism of action. Perform appropriate clustering also.
