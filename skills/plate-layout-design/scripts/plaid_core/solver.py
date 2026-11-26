@@ -200,9 +200,13 @@ class MiniZincSolver:
             lines.append(f'compound_names = [{names}];')
             
             # Concentration names (2D array)
+            # Pad to the longest series: MiniZinc 2-D literals must be rectangular,
+            # and the model only reads indices 1..concentrations for each compound.
+            max_levels = max(c.concentrations for c in config.compounds)
             conc_names_rows = []
             for compound in config.compounds:
-                names = ", ".join(f'"{name}"' for name in compound.concentration_names)
+                padded = list(compound.concentration_names) + [""] * (max_levels - compound.concentrations)
+                names = ", ".join(f'"{name}"' for name in padded)
                 conc_names_rows.append(names)
             conc_names_str = "|".join(conc_names_rows)
             lines.append(f'compound_concentration_names = [|{conc_names_str}|];')
@@ -237,9 +241,11 @@ class MiniZincSolver:
             lines.append(f'control_names = [{names}];')
             
             # Control concentration names
+            max_levels = max(c.concentration_levels for c in config.controls)
             conc_names_rows = []
             for control in config.controls:
-                names = ", ".join(f'"{name}"' for name in control.concentration_names)
+                padded = list(control.concentration_names) + [""] * (max_levels - control.concentration_levels)
+                names = ", ".join(f'"{name}"' for name in padded)
                 conc_names_rows.append(names)
             conc_names_str = "|".join(conc_names_rows)
             lines.append(f'control_concentration_names = [|{conc_names_str}|];')

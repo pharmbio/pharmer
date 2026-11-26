@@ -28,10 +28,10 @@ Contents
   "concentrations_on_different_columns": true,
   "replicates_on_different_plates": false,
   "allow_empty_wells": true,
-  "timeout_seconds": 300,
-  "threads": 8,
+  "timeout_seconds": 120,
+  "parallel": 4,
   "seed": 1,
-  "attempts": 1
+  "attempts": 3
 }
 ```
 
@@ -49,12 +49,16 @@ Everything else has the default shown above.
 | `solvents[]` | Vehicle-only wells (DMSO, water, ...). `replicates` only; written with `CONCuM = 0`. | — |
 | `concentrations_on_different_rows` | Each replicate of a compound's dose series uses a different row for every concentration. | true |
 | `concentrations_on_different_columns` | Same for columns. | true |
-| `replicates_on_different_plates` | Put each replicate series on a different plate (needs at least as many plates as replicates). When false, all concentrations of one replicate series stay on one plate. | false |
+| `replicates_on_different_plates` | Put each replicate series on a different plate (needs at least as many plates as replicates). When false, all replicates of a compound share one plate, so in multi-plate designs compound and plate are confounded. | false |
 | `allow_empty_wells` | Allow unused wells inside the usable area. If false, the sample count must fill whole plates exactly. | true |
-| `timeout_seconds` | Solver time limit per attempt. | 300 |
-| `threads` | Gecode threads (capped to the CPU count). | 8 |
-| `seed` | Random seed; same spec + same seed reproduces the layout. | 1 |
-| `attempts` | After a timeout, retry with `seed+1`, `seed+2`, ... | 1 |
+| `timeout_seconds` | Time limit per seed per round. | 120 |
+| `parallel` | Seeds raced at once, one CPU each; the first layout found wins. | 4 |
+| `seed` | First seed. Round r races seeds `seed + r*parallel ... + parallel-1`. | 1 |
+| `attempts` | Rounds of fresh seeds after all seeds of a round time out. | 3 |
+
+Worst-case run time is `attempts x timeout_seconds` (6 min with the defaults).
+The seed that won is written to `<name>_design.json` (with `parallel: 1,
+attempts: 1`), so re-running that file reproduces the same layout.
 
 Names: no commas or double quotes. A name may appear in only one of the three
 lists (case-insensitive). Concentrations within one compound must be distinct.
@@ -87,7 +91,7 @@ DMSO,0,14,solvent
 
 `role`: `treatment` (= compound), `control`, or `solvent`. Missing `role` means
 treatment. Plate format, edge and solver options come from the command-line flags
-(`--plate-format`, `--empty-edge`, `--timeout`, `--attempts`, ...); constraint
+(`--plate-format`, `--empty-edge`, `--timeout`, `--parallel`, `--attempts`, `--seed`); constraint
 flags keep their defaults. For non-default constraints, write a spec JSON.
 
 ## Outputs
@@ -103,17 +107,21 @@ flags keep their defaults. For non-default constraints, write a spec JSON.
 | `cmpdnum` | `Etoposide_0.1` | Condition label (name_conc). |
 | `role` | `compound` | `compound`, `control` or `solvent`. |
 
-Wells not listed are empty (edge wells and any spare inner wells).
+Wells not listed are empty (edge wells and any spare inner wells). iPLAID
+needs only `plateID,well,cmpdname,CONCuM`; `cmpdnum` and `role` are extra.
+`plot_layout.py` uses `role` to tell controls from compounds; without it, every
+well with a concentration is drawn as a compound.
 
 `<name>_platemap.csv`: a grid per plate (row letters x column numbers), cell text
 `name @ conc`, for people who want to read the layout in a spreadsheet.
 
-`<name>_layout.png`: per plate, an identity panel (codes C1.., K1.., S with legend)
+`<name>_layout.png`: per plate, an identity panel (codes C1.., K1.., S, numbered
+alphabetically within each role; see the legend)
 and a concentration panel (log µM, one-hue scale; solvent wells hollow).
 
-`<name>_design.json`: the resolved spec plus `solve` = {seed, attempt, seconds,
-plates, wells}. Re-running `design_layout.py` on this spec with that seed reproduces
-the layout; `check_layout.py --spec` also reads it.
+`<name>_design.json`: `{"spec": ..., "solve": {seed, round, seconds, total_seconds,
+plates, wells}}`. The spec part holds the winning seed; `check_layout.py --spec`
+reads this file.
 
 ## What PLAID guarantees
 

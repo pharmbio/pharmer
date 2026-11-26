@@ -11,6 +11,10 @@ Changes made for the plate-layout-design skill:
   `PlateDesigner` (the skill reads its own spec format in `design_layout.py`);
 - `validate_minizinc_available()` also honours the `MINIZINC_PATH` variable, as
   the solver already did;
+- `MiniZincSolver._generate_dzn` pads `compound_concentration_names` and
+  `control_concentration_names` to a rectangular array; before, compounds (or
+  controls) with different numbers of concentrations produced a .dzn that
+  MiniZinc rejects;
 - removed the examples, the unused `utils/dzn_generator.py` and the docs.
 The MiniZinc model in `templates/` is unchanged.
 

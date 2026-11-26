@@ -38,6 +38,54 @@ def parse_well(well: str):
     return row, int(m.group(2))  # 1-based
 
 
+def _series_partition_exists(wells_by_conc, check_rows, check_cols, limit=200_000):
+    """Can the wells be grouped into series (one well per concentration each)
+    so that no series repeats a row (and/or column)?
+
+    wells_by_conc: list over concentrations of [(row, col), ...]. Returns True,
+    False, or None when the search hit `limit` nodes. Series whose
+    concentrations have unequal well counts on this plate are not checkable as
+    full series; the shortest count is used and leftovers must still fit.
+    """
+    lists = sorted(wells_by_conc, key=len, reverse=True)
+    n_series = len(lists[0])
+    series = [(set(), set()) for _ in range(n_series)]
+    nodes = [0]
+
+    def place(ci, wi):
+        if ci == len(lists):
+            return True
+        if wi == len(lists[ci]):
+            return place(ci + 1, 0)
+        nodes[0] += 1
+        if nodes[0] > limit:
+            raise TimeoutError
+        r, c = lists[ci][wi]
+        used = set()  # series already taken by an earlier well of this concentration
+        for w2 in range(wi):
+            used.add(assign[(ci, w2)])
+        for si, (rows, cols) in enumerate(series):
+            if si in used or (check_rows and r in rows) or (check_cols and c in cols):
+                continue
+            if check_rows:
+                rows.add(r)
+            if check_cols:
+                cols.add(c)
+            assign[(ci, wi)] = si
+            if place(ci, wi + 1):
+                return True
+            rows.discard(r)  # safe: r was not in rows before (or rows unused)
+            cols.discard(c)
+            del assign[(ci, wi)]
+        return False
+
+    assign = {}
+    try:
+        return place(0, 0)
+    except (TimeoutError, RecursionError):
+        return None
+
+
 def _r(status, name, detail):
     return {"status": status, "check": name, "detail": detail}
 
@@ -141,11 +189,15 @@ def run_checks(layout_path, spec_path=None, plate_rows=None, plate_cols=None, em
     res.append(_r("FAIL" if problems else "PASS", "replicate counts",
                   "; ".join(problems[:10]) if problems else f"{len(exp)} condition(s), all counts match the spec"))
 
-    # 3. dose series spread over rows / columns ------------------------------
-    for axis, flag in (("row", "concentrations_on_different_rows"), ("col", "concentrations_on_different_columns")):
-        if not spec.get(flag, True):
-            continue
-        viol = []
+    # 3. dose series spread over rows / columns -------------------------------
+    # PLAID requires each replicate *series* (one well per concentration) to use
+    # distinct rows/columns. The CSV does not say which well belongs to which
+    # series, so search for a grouping that satisfies the rule.
+    use_rows = spec.get("concentrations_on_different_rows", True)
+    use_cols = spec.get("concentrations_on_different_columns", True)
+    if use_rows or use_cols:
+        in_rows = plate_rows - 2 * e
+        viol, unknown = [], []
         for item in spec.get("compounds", []):
             concs = [f"{float(c):.6g}" for c in item["concentrations_uM"]]
             if len(concs) < 2:
@@ -156,13 +208,25 @@ def run_checks(layout_path, spec_path=None, plate_rows=None, plate_cols=None, em
                 groups[r].append(c)
             sub = df[df["cmpdname"] == item["name"]]
             for plate, pdf in sub.groupby("plateID"):
-                per_conc = Counter(pdf["conc_key"])
-                bound = sum(max(per_conc.get(c, 0) for c in cs) for cs in groups.values())
-                worst = pdf.groupby(axis).size().max()
-                if worst > bound:
-                    viol.append(f"{item['name']} on {plate}: {worst} wells share one {axis} (max {bound})")
-        name = "dose series on different " + ("rows" if axis == "row" else "columns")
-        res.append(_r("FAIL" if viol else "PASS", name, "; ".join(viol[:6]) if viol else "no compound stacks its concentrations on one " + axis))
+                for gconcs in groups.values():
+                    if len(gconcs) < 2:
+                        continue
+                    wells = [list(zip(pdf.loc[pdf["conc_key"] == c, "row"], pdf.loc[pdf["conc_key"] == c, "col"]))
+                             for c in gconcs]
+                    check_rows = use_rows and len(gconcs) <= in_rows  # PLAID only spreads the first `rows` levels
+                    ok = _series_partition_exists(wells, check_rows, use_cols)
+                    if ok is False:
+                        viol.append(f"{item['name']} on {plate}")
+                    elif ok is None:
+                        unknown.append(f"{item['name']} on {plate}")
+        axes = " and ".join(x for x, f in (("rows", use_rows), ("columns", use_cols)) if f)
+        if viol:
+            res.append(_r("FAIL", f"dose series on different {axes}",
+                          "no way to split these wells into replicate series with distinct " + axes + ": " + "; ".join(viol[:6])))
+        elif unknown:
+            res.append(_r("WARN", f"dose series on different {axes}", "could not verify (search limit): " + "; ".join(unknown[:6])))
+        else:
+            res.append(_r("PASS", f"dose series on different {axes}", "every compound's wells split into replicate series with distinct " + axes))
 
     # 4. replicates on different plates ------------------------------------
     if spec.get("replicates_on_different_plates") and n_plates > 1:

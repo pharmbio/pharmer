@@ -15,6 +15,8 @@ Outputs (in --out, prefixed by --name):
     <name>_design.json    resolved spec + solver settings + seed (for reproducing)
     <name>_check.txt      output of check_layout.py
 
+Default --out is <input stem>_layout/ next to the input file.
+
 Exit codes: 0 = layout written and all checks passed, 1 = bad input / preflight
 error, 2 = solver found no layout, 3 = layout written but a check failed.
 """
@@ -32,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from plaid_core import Compound, Control, PlateConfig, PlateDesigner  # noqa: E402
+from plaid_core import Compound, Control, PlateConfig  # noqa: E402
 from plaid_core.exceptions import (  # noqa: E402
     NoSolutionFoundError,
     PLAIDError,
@@ -49,10 +51,10 @@ DEFAULTS = {
     "concentrations_on_different_columns": True,
     "replicates_on_different_plates": False,
     "allow_empty_wells": True,
-    "timeout_seconds": 300,
-    "threads": 8,
+    "timeout_seconds": 120,
+    "parallel": 4,
     "seed": 1,
-    "attempts": 1,
+    "attempts": 3,
 }
 
 ROLES = ("compound", "control", "solvent")
@@ -124,9 +126,10 @@ def load_spec(path: Path) -> dict:
     if path.suffix.lower() == ".csv":
         return load_feeder_csv(path)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise SpecError(f"{path.name} is not valid JSON: {exc}")
+    return data["spec"] if "spec" in data and "solve" in data else data  # accept *_design.json
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +181,8 @@ def normalise(raw: dict, overrides: dict) -> dict:
     spec.update({k: v for k, v in raw.items() if k not in ("compounds", "controls", "solvents")})
     spec.update({k: v for k, v in overrides.items() if v is not None})
 
-    if "plate_rows" in spec and "plate_cols" in spec and "plate_format" not in raw and overrides.get("plate_format") is None:
-        rows, cols = int(spec["plate_rows"]), int(spec["plate_cols"])
+    if overrides.get("plate_format") is None and "plate_rows" in raw and "plate_cols" in raw:
+        rows, cols = int(raw["plate_rows"]), int(raw["plate_cols"])
     else:
         fmt = int(spec["plate_format"])
         if fmt not in PLATE_FORMATS:
@@ -250,7 +253,7 @@ def preflight(spec: dict, compounds, controls) -> tuple[list[str], list[str], di
     n_controls = sum(c.concentration_levels * c.replicates for c in controls)
     summary = {
         "plate": f"{rows}x{cols}", "usable_area": f"{in_rows}x{in_cols}", "usable_wells_per_plate": inner,
-        "sample_wells": total, "control_and_solvent_wells": n_controls, "plates_needed": n_plates,
+        "filled_wells": total, "of_which_controls_and_solvents": n_controls, "plates_needed": n_plates,
         "empty_usable_wells": empty, "fill_pct": round(100 * total / (n_plates * inner), 1),
     }
 
@@ -293,17 +296,19 @@ def preflight(spec: dict, compounds, controls) -> tuple[list[str], list[str], di
             f"The design needs {n_plates} plates. PLAID solves are slow beyond ~3 plates; split the compounds "
             "into separate designs (one per plate or batch) and run them separately."
         )
-    if summary["fill_pct"] >= 95:
+    if n_plates > 1 and summary["fill_pct"] > 85:
         warnings.append(
-            f"Plates are {summary['fill_pct']}% full. Near-full designs are the hardest to solve: expect long "
-            "solves and use --attempts 3 or more."
+            f"{n_plates} plates at {summary['fill_pct']}% fill. Multi-plate designs above ~85% fill often time "
+            "out; a larger plate format or fewer wells per design solves much faster."
         )
-    if total and n_controls / total > 0.25:
+    big = [c for c in controls if c.concentration_levels * c.replicates > 36]
+    if big and n_plates == 1:
         warnings.append(
-            f"{n_controls} of {total} wells are controls/solvents. Many controls make the control-balancing "
-            "constraints hard; expect longer solves."
+            "A control/solvent has more than 36 wells on one plate. Such designs can time out; if they do, "
+            "nearby counts often solve in seconds (see references/solver_troubleshooting.md)."
         )
     return errors, warnings, summary
+
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +374,7 @@ def write_outputs(rows: list[dict], spec: dict, out: Path, name: str, solve_info
             writer.writerow([])
 
     public = {k: v for k, v in spec.items() if k != "items"}
+    public.update(seed=solve_info["seed"], parallel=1, attempts=1)  # re-running this spec reproduces the layout
     public["compounds"] = [_item_json(i) for i in spec["items"] if i["role"] == "compound"]
     public["controls"] = [_item_json(i) for i in spec["items"] if i["role"] == "control"]
     public["solvents"] = [{"name": i["name"], "replicates": i["entries"][0][1]} for i in spec["items"] if i["role"] == "solvent"]
@@ -382,54 +388,112 @@ def _item_json(item):
     return {"name": item["name"], "concentrations_uM": concs, "replicates": reps[0] if len(set(reps)) == 1 else reps}
 
 
+def _plate_config(spec, compounds, controls, seed: int) -> PlateConfig:
+    return PlateConfig(
+        plate_rows=spec["plate_rows"], plate_cols=spec["plate_cols"], empty_edge=int(spec["empty_edge"]),
+        compounds=compounds, controls=controls,
+        concentrations_on_different_rows=bool(spec["concentrations_on_different_rows"]),
+        concentrations_on_different_columns=bool(spec["concentrations_on_different_columns"]),
+        replicates_on_same_plate=not spec["replicates_on_different_plates"],
+        replicates_on_different_plates=bool(spec["replicates_on_different_plates"]),
+        allow_empty_wells=bool(spec["allow_empty_wells"]),
+        timeout_seconds=int(spec["timeout_seconds"]), num_threads=1, random_seed=seed,
+    )
+
+
 def solve(spec, compounds, controls) -> tuple[object, dict]:
-    designer = PlateDesigner()
-    seed = int(spec["seed"])
-    last_error = None
-    for attempt in range(int(spec["attempts"])):
-        cfg = PlateConfig(
-            plate_rows=spec["plate_rows"], plate_cols=spec["plate_cols"], empty_edge=int(spec["empty_edge"]),
-            compounds=compounds, controls=controls,
-            concentrations_on_different_rows=bool(spec["concentrations_on_different_rows"]),
-            concentrations_on_different_columns=bool(spec["concentrations_on_different_columns"]),
-            replicates_on_same_plate=not spec["replicates_on_different_plates"],
-            replicates_on_different_plates=bool(spec["replicates_on_different_plates"]),
-            allow_empty_wells=bool(spec["allow_empty_wells"]),
-            timeout_seconds=int(spec["timeout_seconds"]), num_threads=int(spec["threads"]),
-            random_seed=seed + attempt,
-        )
-        t0 = time.time()
-        print(f"[solve] attempt {attempt + 1}/{spec['attempts']}: seed={seed + attempt}, "
-              f"timeout={spec['timeout_seconds']}s, threads={spec['threads']} ...", flush=True)
-        try:
-            layout = designer.design(cfg)
-            info = {"seed": seed + attempt, "attempt": attempt + 1, "seconds": round(time.time() - t0, 1),
-                    "plates": layout.num_plates, "wells": len(layout.wells)}
-            print(f"[solve] solved in {info['seconds']} s", flush=True)
-            return layout, info
-        except NoSolutionFoundError as exc:
-            last_error = exc
-            print(f"[solve] no layout after {time.time() - t0:.0f} s: {exc}", flush=True)
-            if "UNSATISFIABLE" in str(exc) or "No valid plate layout exists" in str(exc):
-                break  # proven impossible; another seed will not help
-    raise last_error
+    """Race `parallel` seeds (one Gecode thread each); first layout wins.
+
+    PLAID's search is randomised and its run time is heavy-tailed: the same
+    design can take 3 s with one seed and time out with another. Several short
+    single-thread runs with different seeds beat one long multi-thread run.
+    Rounds repeat with fresh seeds up to `attempts` times.
+    """
+    import subprocess
+    import tempfile
+
+    from plaid_core.output import Layout
+    from plaid_core.solver import MiniZincSolver
+    from plaid_core.validators import validate_plate_config
+
+    solver = MiniZincSolver()
+    model = HERE / "plaid_core" / "templates" / "plate-design.mzn"
+    base_seed, parallel = int(spec["seed"]), max(1, int(spec["parallel"]))
+    timeout = int(spec["timeout_seconds"])
+    cfg0 = _plate_config(spec, compounds, controls, base_seed)
+    validate_plate_config(cfg0)
+    dzn = MiniZincSolver._generate_dzn(cfg0)
+    t_start = time.time()
+    with tempfile.TemporaryDirectory() as tmp:
+        dzn_path = Path(tmp) / "design.dzn"
+        dzn_path.write_text(dzn)
+        for rnd in range(int(spec["attempts"])):
+            seeds = [base_seed + rnd * parallel + i for i in range(parallel)]
+            print(f"[solve] round {rnd + 1}/{spec['attempts']}: racing seeds {seeds}, timeout {timeout}s each ...", flush=True)
+            procs = {}
+            for sd in seeds:
+                cmd = [solver.minizinc_path, "--solver", "Gecode", str(model), str(dzn_path),
+                       "-p", "1", "-r", str(sd), "-t", str(timeout * 1000)]
+                procs[sd] = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            t0 = time.time()
+            winner, unsat, errors = None, False, []
+            try:
+                while procs and winner is None and not unsat:
+                    for sd, proc in list(procs.items()):
+                        if proc.poll() is None:
+                            continue
+                        out, err = proc.communicate()
+                        del procs[sd]
+                        if "=====UNSATISFIABLE=====" in out:
+                            unsat = True
+                        elif "=====UNKNOWN=====" in out:
+                            pass  # this seed timed out
+                        elif proc.returncode != 0 or "=====ERROR=====" in out or "plateID" not in out:
+                            errors.append((out.strip() or err.strip() or f"exit code {proc.returncode}")[-1500:])
+                        else:
+                            winner = (sd, out)
+                            break
+                    if time.time() - t0 > timeout + 30:
+                        break
+                    time.sleep(0.2)
+            finally:
+                for proc in procs.values():
+                    proc.kill()
+                for proc in procs.values():
+                    proc.wait()
+            if winner:
+                sd, out = winner
+                layout = Layout(out.strip())
+                info = {"seed": sd, "round": rnd + 1, "seconds": round(time.time() - t0, 1),
+                        "total_seconds": round(time.time() - t_start, 1), "plates": layout.num_plates,
+                        "wells": len(layout.wells)}
+                print(f"[solve] seed {sd} solved in {info['seconds']} s", flush=True)
+                return layout, info
+            if unsat:
+                raise NoSolutionFoundError(
+                    "UNSATISFIABLE: no layout exists with these constraints (proven by the solver).")
+            if errors and len(errors) == len(seeds):
+                raise SolverError("MiniZinc failed: " + errors[0])
+            print(f"[solve] round {rnd + 1}: no seed finished within {timeout} s", flush=True)
+    raise NoSolutionFoundError(
+        f"TIMEOUT: no layout within {spec['attempts']} round(s) x {parallel} seed(s) x {timeout} s.")
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", type=Path, help="design spec .json or PLAID feeder .csv")
-    ap.add_argument("--out", type=Path, default=Path("plate_layout"), help="output directory")
+    ap.add_argument("--out", type=Path, default=None, help="output directory (default: <input stem>_layout/ next to the input)")
     ap.add_argument("--name", default=None, help="file prefix (default: input file stem)")
     ap.add_argument("--plate-format", type=int, choices=sorted(PLATE_FORMATS))
     ap.add_argument("--empty-edge", type=int)
     ap.add_argument("--timeout", type=int, dest="timeout_seconds", help="seconds per attempt")
-    ap.add_argument("--threads", type=int)
-    ap.add_argument("--seed", type=int)
-    ap.add_argument("--attempts", type=int, help="retry with seed+1, seed+2 ... after a timeout")
+    ap.add_argument("--parallel", type=int, help="seeds raced at once, one CPU each (default 4)")
+    ap.add_argument("--seed", type=int, help="first seed (default 1)")
+    ap.add_argument("--attempts", type=int, help="rounds of fresh seeds after a timeout (default 3)")
     ap.add_argument("--dry-run", action="store_true", help="preflight only; do not call the solver")
     args = ap.parse_args(argv)
 
-    overrides = {k: getattr(args, k) for k in ("plate_format", "empty_edge", "timeout_seconds", "threads", "seed", "attempts")}
+    overrides = {k: getattr(args, k) for k in ("plate_format", "empty_edge", "timeout_seconds", "parallel", "seed", "attempts")}
     try:
         spec = normalise(load_spec(args.input), overrides)
         compounds, controls, lookup = build_plaid_groups(spec)
@@ -464,7 +528,8 @@ def main(argv=None) -> int:
 
     rows = layout_rows(layout, lookup)
     name = args.name or args.input.stem
-    paths = write_outputs(rows, spec, args.out, name, info)
+    out_dir = args.out or args.input.resolve().parent / f"{args.input.stem}_layout"
+    paths = write_outputs(rows, spec, out_dir, name, info)
 
     from check_layout import run_checks, format_report  # local module
     results = run_checks(paths["layout"], paths["design"])
