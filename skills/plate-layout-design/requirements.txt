@@ -1,0 +1,3 @@
+pandas>=2.0
+matplotlib>=3.7
+# Not pip-installable: MiniZinc >= 2.6 with the Gecode solver (see SKILL.md, Setup).
