@@ -12,6 +12,8 @@ Claude Code, the Claude apps, the Claude API, and any other agents that support 
 | Skill                                              | What it does                                                                                                                                                        |
 | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`data-visualization`](skills/data-visualization/) | Journal-ready scientific figures: builds at the journal's size, fonts and dpi, checks colour-blind safety, audits the exported files, and writes the figure legend. |
+| [`plate-layout-design`](skills/plate-layout-design/) | Microplate layouts (96/384/1536) with the PLAID constraint solver from iPLAID: spreads dose series, balances controls, keeps edges empty, checks the result and writes an iPLAID-compatible layout CSV and plate map. |
+| [`public-database-lookup`](skills/public-database-lookup/) | Reproducible lookups in 46 public scientific database APIs (PubChem, ChEMBL, UniProt, Ensembl, ClinVar, gnomAD, ClinicalTrials.gov and more): resolves identifiers, paginates and reconciles counts, and reports provenance. |
 
 ## Quick start
 
